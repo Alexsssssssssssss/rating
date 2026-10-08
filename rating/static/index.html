@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>雀魂 Rating 笔记</title><link rel="stylesheet" href="/static/style.css"></head>
+<body>
+<header><a class="brand" href="/">▥ <span>雀魂 Rating 笔记</span></a><span class="pill">四人南 · Mortal</span></header>
+<main>
+<section class="intro"><div class="eyebrow">MAHJONG REVIEW NOTEBOOK</div><h1>把每一场，连成进步的轨迹。</h1><p>从雀魂牌谱屋查询最近的四人南牌谱，逐场检讨，查看 Rating 与 AI 一致率。</p></section>
+<section class="search card">
+<form id="query-form"><label for="query">用户名与场数</label><div class="search-row"><input id="query" name="query" placeholder="例如：fioq421 20" value="fioq421 20" autocomplete="off" required maxlength="100"><button id="submit" type="submit">开始分析 <span>↗</span></button></div><div class="options"><label><input id="refresh" type="checkbox">重新分析，忽略缓存</label><span>金南 / 玉南 / 王座南 · 1–200 场</span></div></form>
+<p class="hint">逐场串行提交，结果自动保存。分析耗时取决于 Mortal 的队列；网站验证、限流或隐藏牌谱会明确标注。</p>
+</section>
+<div id="error" class="notice error" role="alert" hidden></div>
+<section id="job-panel" hidden>
+<div class="job-heading"><div><h2 id="job-title">分析任务</h2><p id="job-subtitle"></p></div><div class="actions"><button id="cancel" class="secondary" hidden>取消任务</button><button id="retry" class="secondary" hidden>重试未完成场次</button></div></div>
+<div class="card progress-card"><div class="progress-heading"><span id="job-status" aria-live="polite"></span><span id="progress-text"></span></div><progress id="progress" max="1" value="0"></progress><p id="job-message" class="hint"></p><div id="candidates"></div></div>
+<div class="metrics"><div class="card metric"><label>平均 Rating</label><strong id="rating">—</strong><small>按成功分析的场次平均</small></div><div class="card metric"><label>平均一致率</label><strong id="agreement">—</strong><small id="weighted">—</small></div><div class="card metric"><label>区间 PT 增减</label><strong id="pt">—</strong><small id="pt-note">从旧到新累计</small></div><div class="card metric"><label>成功分析</label><strong id="analyzed">—</strong><small id="models">—</small></div></div>
+<section id="chart-panel" class="card chart-card" hidden><div class="section-heading"><div><h2>对局趋势</h2><p>从旧到新 · 缺失数据留空 · 日期为 UTC+8</p></div><div class="actions"><a id="png" class="download" download>PNG ↓</a><a id="svg" class="download" download>SVG ↓</a><a id="csv" class="download">CSV ↓</a><a id="json" class="download">JSON ↓</a></div></div><div class="chart-scroll"><img id="chart" alt="Rating 与一致率、恶手率、PT 增减及累计趋势图"></div><p class="hint">Rating 与一致率采用独立坐标轴。恶手率需要含逐步动作概率的 JSON 报告；网站报告未提供时留空。</p></section>
+<section id="table-panel" class="card table-card" hidden><div class="section-heading"><h2>逐场记录</h2><span class="hint">点击牌谱可前往原站</span></div><div class="table-scroll"><table><thead><tr><th>#</th><th>时间 / 场型</th><th>顺位</th><th>PT</th><th>Rating</th><th>一致率</th><th>状态</th><th>操作</th></tr></thead><tbody id="games"></tbody></table></div></section>
+</section>
+<section class="history"><div class="section-heading"><h2>最近任务</h2><button id="reload-history" class="text-button">刷新</button></div><div id="history" class="history-list"><p class="hint">还没有查询记录。</p></div></section>
+<footer>数据：<a href="https://amae-koromo.sapk.ch/" target="_blank" rel="noopener">雀魂牌谱屋</a> · 分析：<a href="https://mjai.ekyu.moe/zh-cn.html" target="_blank" rel="noopener">Mortal</a><p>仅显示真实分析结果。Rating 为 mjai-reviewer 的 0–100 指标；一致率为一致决策数 ÷ 总决策数。</p></footer>
+</main><script src="/static/app.js"></script>
+</body></html>
