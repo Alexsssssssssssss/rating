@@ -83,6 +83,27 @@ class MortalBrowser:
             raise AnalysisError("无法唯一识别 Mortal 提交按钮。可配置 MORTAL_SUBMIT_SELECTOR 后重试。")
         return submit
 
+    @staticmethod
+    def validate_report_identity(result, html, game):
+        """Preserve a parsed report for diagnosis; never assign an unverified score."""
+        log_id = result.get("log_id")
+        if log_matches(game["uuid"], log_id):
+            return
+        root = Path(os.getenv("RATING_DATA_DIR", ".data")).resolve() / "reports"
+        root.mkdir(parents=True, exist_ok=True)
+        # Use a generated name, never untrusted game identifiers as a path.
+        path = root / f"unverified-{time.time_ns()}.html"
+        try:
+            path.write_text(html, encoding="utf-8")
+        except OSError:
+            saved = "报告保存失败，请检查数据目录写入权限。"
+        else:
+            saved = f"完整报告已保存到：{path}。"
+        if not isinstance(log_id, str) or not log_id.strip():
+            raise AnalysisError("Mortal 报告缺少牌谱 ID（log_id），尚不能确认所属比赛；这不等于报告来自另一场。"
+                                + saved + "需要带原始 ref 的独立牌谱进行完整内容校验，未录入评分。")
+        raise AnalysisError("Mortal 报告中的牌谱 ID 与当前比赛不同，拒绝录入评分。" + saved)
+
     async def analyze(self, game, cancelled=lambda: False):
         if game["masked"]:
             raise AnalysisError("牌谱屋隐藏了该场 UUID，原站也未提供 AI 检讨入口；无法自动提交 Mortal。")
@@ -131,14 +152,12 @@ class MortalBrowser:
                         try:
                             html = await frame.content()
                             result = parse_html_report(html, game["seat"])
-                            log_id = result.get("log_id")
-                            if not log_matches(game["uuid"], log_id):
-                                raise AnalysisError("Mortal 返回的牌谱 ID 无法与当前比赛匹配。")
+                            self.validate_report_identity(result, html, game)
                             result['requested_model'] = os.getenv('MORTAL_MODEL_TAG', '4.1b')
                             return result, html
                         except AnalysisError as exc:
                             last_error = str(exc)
-                            if any(s in last_error for s in ("未公开 Rating", "与目标用户不符", "无法与当前比赛匹配")):
+                            if any(s in last_error for s in ("未公开 Rating", "与目标用户不符", "无法与当前比赛匹配", "缺少牌谱 ID", "牌谱 ID 与当前比赛不同")):
                                 raise
                         except BrowserError:
                             continue
