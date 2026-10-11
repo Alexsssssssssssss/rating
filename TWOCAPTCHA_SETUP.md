@@ -58,3 +58,9 @@ Cloudflare 仍可能拒绝结果；若报错，提供任务错误文本，不发
 ```
 
 应显示 `context-response-v3`，然后才重新启动网页服务进行单场测试。
+
+## 网页刷新跳转与诊断
+
+`server-refresh-v4` 在响应到达时立即捕获正文和服务器跳转指令，支持 Refresh 响应头和 HTML meta refresh。HTML meta 在文档被丢弃前快照，但只有源页面已绑定实际 POST 才接受；只跟随明确的同站 review/report 跳转，不使用示例链接、任意标签页地址或跨站跳转作为身份依据。版本检查命令现在应显示 `server-refresh-v4`。
+如果仍无法关联报告，会在数据目录 reports 下同时保存 `unverified-*.html` 和 `navigation-*.json`。JSON 仅含版本、HTTP 方法、主机、路径、状态码与匹配布尔值，不含 URL 查询、请求正文、Cookie 或 API key。不要反复重试，应先检查这份诊断。
+57 项测试通过；真实上传报告及用户本地解析器在模拟的新标签页 + Refresh 流程验证通过。尚未验证真实付费端到端流程。

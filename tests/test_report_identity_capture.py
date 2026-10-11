@@ -83,3 +83,44 @@ def test_redirect_chain_preserves_post_identity(game):
     assert MortalBrowser.submission_matches(final, game)
     final.url = 'https://example.test/report/test'
     assert not MortalBrowser.submission_matches(final, game)
+
+
+@pytest.mark.parametrize('kind', ['header', 'meta'])
+async def test_report_navigation_from_server_refresh(game, html_report, monkeypatch, kind):
+    from test_browser import OFFICIAL_FORM
+    monkeypatch.setenv('MORTAL_INTERVAL', '0')
+    monkeypatch.setenv('MORTAL_TIMEOUT', '6')
+    report = html_report.replace('<dt>牌谱 ID</dt><dd>test-game-001</dd>', '')
+    form = OFFICIAL_FORM.replace(' disabled', '')
+    async with MortalBrowser() as browser:
+        await browser.context.route('https://mjai.ekyu.moe/zh-cn.html*',
+            lambda route: route.fulfill(content_type='text/html; charset=utf-8', body=form))
+        async def submitted(route):
+            if kind == 'header':
+                await route.fulfill(content_type='text/html', headers={'Refresh': '0; url=/report/refresh.html'}, body='Waiting')
+            else:
+                await route.fulfill(content_type='text/html', body='<meta http-equiv="refresh" content="0; url=/report/refresh.html">')
+        await browser.context.route('https://mjai.ekyu.moe/review', submitted)
+        await browser.context.route('https://mjai.ekyu.moe/report/refresh.html',
+            lambda route: route.fulfill(content_type='text/html; charset=utf-8', body=report))
+        result, raw = await browser.analyze(game)
+        assert result['identity_method'] == 'official-post-response'
+        assert result['rating'] == 90.25
+
+
+def test_only_explicit_same_site_server_navigation_is_trusted():
+    from types import SimpleNamespace
+    response = SimpleNamespace(url='https://mjai.ekyu.moe/review', headers={})
+    targets = MortalBrowser.server_redirect_targets(response, '''
+        <a href="/report/example.html">Example</a>
+        <meta http-equiv="refresh" content="0; url=https://example.test/report/foreign.html">
+        <script>window.location.replace('/report/actual.html');</script>
+    ''')
+    assert targets == {'https://mjai.ekyu.moe/report/actual.html'}
+
+
+def test_refresh_header_with_quoted_url():
+    from types import SimpleNamespace
+    response = SimpleNamespace(url='https://mjai.ekyu.moe/review',
+        headers={'refresh': '0; URL="/report/actual.html"'})
+    assert MortalBrowser.server_redirect_targets(response, '') == {'https://mjai.ekyu.moe/report/actual.html'}

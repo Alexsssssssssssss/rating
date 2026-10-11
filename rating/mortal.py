@@ -6,15 +6,16 @@ import time
 from pathlib import Path
 from email.parser import BytesParser
 from email.policy import default as email_policy
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit, urljoin, urldefrag
 
 from playwright.async_api import async_playwright, Error as BrowserError
+from bs4 import BeautifulSoup
 
 from .reports import AnalysisError, parse_html_report, log_matches
 from . import captcha
 
 MORTAL_SITE = "https://mjai.ekyu.moe/zh-cn.html"
-MORTAL_FLOW_VERSION = "context-response-v3"
+MORTAL_FLOW_VERSION = "server-refresh-v4"
 
 
 class MortalBrowser:
@@ -40,6 +41,26 @@ class MortalBrowser:
         try:
             self.browser = await self.pw.chromium.launch(**opts)
             self.context = await self.browser.new_context(locale="zh-CN", accept_downloads=True)
+            self._navigation_observer = None
+            def observe_server_navigation(source, payload):
+                if self._navigation_observer is not None:
+                    self._navigation_observer(payload)
+            await self.context.expose_binding("__ratingServerNavigation", observe_server_navigation)
+            await self.context.add_init_script(r"""(() => {
+              if (location.hostname !== 'mjai.ekyu.moe') return;
+              const seen = new Set();
+              const scan = () => {
+                for (const meta of document.querySelectorAll('meta[http-equiv]')) {
+                  if (meta.httpEquiv.toLowerCase() !== 'refresh') continue;
+                  const refresh = meta.content;
+                  if (seen.has(refresh)) continue;
+                  seen.add(refresh);
+                  window.__ratingServerNavigation({url: location.href, refresh}).catch(() => {});
+                }
+              };
+              new MutationObserver(scan).observe(document, {subtree: true, childList: true, attributes: true});
+              document.addEventListener('DOMContentLoaded', scan);
+            })();""")
             if self.captcha_enabled:
                 await self.context.add_init_script(captcha.TURNSTILE_CAPTURE)
         except BrowserError as exc:
@@ -129,6 +150,41 @@ class MortalBrowser:
                 and fields.get("engine") == ["mortal"])
 
     @staticmethod
+    def server_redirect_targets(response, html):
+        """Only follow explicit navigation instructions from a bound response."""
+        targets = []
+        if response.headers.get("location"):
+            targets.append(response.headers["location"])
+        refreshes = [response.headers.get("refresh", "")]
+        if html:
+            soup = BeautifulSoup(html, "html.parser")
+            for meta in soup.select('meta[http-equiv]'):
+                if meta.get('http-equiv', '').casefold() == 'refresh':
+                    refreshes.append(meta.get('content', ''))
+            # Literal assignments emitted by the server, not arbitrary links,
+            # examples, user-provided URLs, or JavaScript execution.
+            for script in soup.select('script:not([src])'):
+                text = script.get_text()
+                for pattern in (
+                    r'(?:window\.)?location(?:\.href)?\s*=\s*[\"\']([^\"\']+)[\"\']',
+                    r'(?:window\.)?location\.(?:replace|assign)\(\s*[\"\']([^\"\']+)[\"\']\s*\)',
+                ):
+                    targets.extend(re.findall(pattern, text))
+        for refresh in refreshes:
+            match = re.search(r'(?:^|;)\s*url\s*=\s*(.+?)\s*$', refresh, re.I)
+            if match:
+                targets.append(match[1].strip("\"'"))
+        safe = set()
+        for target in targets:
+            absolute = urldefrag(urljoin(response.url, target.replace('\\/', '/')))[0]
+            url = urlsplit(absolute)
+            if url.scheme == 'https' and url.netloc == 'mjai.ekyu.moe' and (
+                url.path == '/review' or url.path.startswith('/review/') or url.path.startswith('/report/')
+            ):
+                safe.add(absolute)
+        return safe
+
+    @staticmethod
     def validate_report_identity(result, html, game, bound_submission=False):
         """Preserve a parsed report for diagnosis; never assign an unverified score."""
         log_id = result.get("log_id")
@@ -170,12 +226,36 @@ class MortalBrowser:
             delay -= 1
         page = await self.context.new_page()
         responses = []
+        linked_targets = set()
+        bodies = {}
+        captures = set()
+        async def capture_body(response):
+            try:
+                body = await response.text()
+                bodies[response] = body
+                if self.submission_matches(response.request, game) or urldefrag(response.url)[0] in linked_targets:
+                    linked_targets.update(self.server_redirect_targets(response, body))
+            except BrowserError:
+                pass
         def track_response(response):
-            # Context-level events include the first navigation of a new tab;
-            # a page-level listener cannot see that request reliably.
+            # Read navigation instructions immediately, before a refresh drops
+            # the previous document from the browser's resource buffer.
             if response.request.is_navigation_request():
                 responses.append(response)
+                bound = self.submission_matches(response.request, game)
+                bound = bound or urldefrag(response.url)[0] in linked_targets
+                if bound:
+                    linked_targets.update(self.server_redirect_targets(response, ""))
+                if 200 <= response.status < 300:
+                    task = asyncio.create_task(capture_body(response))
+                    captures.add(task)
+                    task.add_done_callback(captures.discard)
         self.context.on("response", track_response)
+        meta_snapshots = []
+        def observe_meta(payload):
+            if isinstance(payload, dict) and isinstance(payload.get('url'), str) and isinstance(payload.get('refresh'), str):
+                meta_snapshots.append(payload)
+        self._navigation_observer = observe_meta
         try:
             target = f"{MORTAL_SITE}?url={quote(game['record_url'], safe='')}"
             try:
@@ -206,13 +286,34 @@ class MortalBrowser:
             while time.monotonic() < deadline:
                 if cancelled():
                     raise AnalysisError("任务已取消。")
+                # Snapshot meta refresh before the old document is discarded;
+                # trust it only if its source response traces to this submission.
+                for response in list(responses):
+                    source_bound = self.submission_matches(response.request, game)
+                    source_bound = source_bound or urldefrag(response.url)[0] in linked_targets
+                    if not source_bound or response.status >= 400:
+                        continue
+                    for snapshot in meta_snapshots:
+                        if snapshot['url'] == response.url:
+                            from types import SimpleNamespace
+                            captured = SimpleNamespace(url=response.url, headers={'refresh': snapshot['refresh']})
+                            linked_targets.update(self.server_redirect_targets(captured, ''))
                 # Parse the precise HTTP response first, including popup and
                 # redirect navigation. Never infer provenance from tab order.
                 for response in list(responses):
                     try:
-                        if response.status != 200 or not self.submission_matches(response.request, game):
+                        bound = self.submission_matches(response.request, game)
+                        bound = bound or urldefrag(response.url)[0] in linked_targets
+                        if not bound or response.status >= 400:
                             continue
-                        html = await response.text()
+                        html = ""
+                        if 200 <= response.status < 300:
+                            if response not in bodies:
+                                bodies[response] = await response.text()
+                            html = bodies[response]
+                        linked_targets.update(self.server_redirect_targets(response, html))
+                        if response.status != 200:
+                            continue
                         result = parse_html_report(html, game["seat"])
                         self.validate_report_identity(result, html, game, True)
                         result['requested_model'] = os.getenv('MORTAL_MODEL_TAG', '4.1b')
@@ -247,12 +348,35 @@ class MortalBrowser:
                     raise AnalysisError("Mortal 要求人机验证或触发限流；已暂停自动访问，请在原站完成验证或稍后重试。")
                 await asyncio.sleep(2)
             if unverified is not None:
+                import json
+                diagnostics = []
+                for response in responses:
+                    request = response.request
+                    url = urlsplit(response.url)
+                    diagnostics.append({"method": request.method, "host": url.hostname,
+                        "path": url.path, "status": response.status,
+                        "post_matches": self.submission_matches(request, game),
+                        "linked_by_server": urldefrag(response.url)[0] in linked_targets})
+                root = Path(os.getenv("RATING_DATA_DIR", ".data")).resolve() / "reports"
+                try:
+                    root.mkdir(parents=True, exist_ok=True)
+                    (root / f"navigation-{time.time_ns()}.json").write_text(
+                        json.dumps({"version": MORTAL_FLOW_VERSION, "responses": diagnostics},
+                                   ensure_ascii=False), encoding="utf-8")
+                except OSError:
+                    pass
                 self.validate_report_identity(unverified[0], unverified[1], game)
             raise AnalysisError(f"Mortal 分析超时：{last_error}。网站结果结构可能更新。")
         except BrowserError as exc:
             raise AnalysisError("Mortal 浏览器操作失败或控件超时，请确认网站表单并重试。") from exc
         finally:
+            self._navigation_observer = None
             self.context.remove_listener("response", track_response)
+            pending_captures = list(captures)
+            for task in pending_captures:
+                task.cancel()
+            if pending_captures:
+                await asyncio.gather(*pending_captures, return_exceptions=True)
             # 任务之间关闭所有页面，防止把上一场报告误当作新结果。
             for p in list(self.context.pages):
                 try:
