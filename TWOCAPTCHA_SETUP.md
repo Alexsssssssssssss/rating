@@ -47,3 +47,14 @@ Cloudflare 仍可能拒绝结果；若报错，提供任务错误文本，不发
 自动流程只在实际 `/review` POST 的牌谱 URL、玩家座位、Mortal 引擎和目标 UUID 全部对应时，通过当前导航的服务器响应绑定身份；支持 URL-encoded 和 multipart 表单，以及同站 HTTP 重定向。读取实际响应正文并解析目标座位，记录 `identity_method=official-post-response`。报告自带的明确编号冲突仍拒绝。
 离线 HTML 没有这些请求记录时，继续拒绝直接赋予牌谱身份，保留本地原有 ref/完整牌谱内容校验。仅凭打开报告的标签页地址不能验证身份。脚本或跨站跳转、无法追溯的弹窗仍会安全拒绝。
 真实 HTML 与用户本地解析器已在模拟提交中验证；未在真实 Mortal 上重新付费跑通整个流程。
+
+## 新标签页报告
+
+`context-response-v3` 使用 BrowserContext 级响应监听，覆盖提交到新标签页时的第一条请求。不会依赖请求的 Frame 对象（新标签页第一次导航时可能尚不可用）。先验证实际 POST/重定向链，再读取其 HTTP 200 响应正文。清理时移除监听，避免下一场误用之前的响应。相关测试包含同页/新标签页、URL-encoded/multipart 表单及字段冲突；真实上传 HTML 与用户本地解析器在模拟的新标签页流程验证通过。
+替换后可在启动目录运行：
+
+```powershell
+.\.venv\Scripts\python.exe -c "from rating.mortal import MORTAL_FLOW_VERSION; print(MORTAL_FLOW_VERSION)"
+```
+
+应显示 `context-response-v3`，然后才重新启动网页服务进行单场测试。

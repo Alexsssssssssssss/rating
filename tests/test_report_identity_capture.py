@@ -34,12 +34,13 @@ def test_explicit_wrong_id_rejected_even_with_submission(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('encoding', ['application/x-www-form-urlencoded', 'multipart/form-data'])
-async def test_missing_id_bound_only_to_exact_post(game, html_report, monkeypatch, encoding):
+@pytest.mark.parametrize('target', ['_self', '_blank'])
+async def test_missing_id_bound_only_to_exact_post(game, html_report, monkeypatch, encoding, target):
     from test_browser import OFFICIAL_FORM
     monkeypatch.setenv('MORTAL_INTERVAL', '0')
     monkeypatch.setenv('MORTAL_TIMEOUT', '10')
     report = html_report.replace('<dt>牌谱 ID</dt><dd>test-game-001</dd>', '')
-    form = OFFICIAL_FORM.replace(' disabled', '').replace('method="post"', f'method="post" enctype="{encoding}"')
+    form = OFFICIAL_FORM.replace(' disabled', '').replace('method="post"', f'method="post" enctype="{encoding}" target="{target}"')
     async with MortalBrowser() as browser:
         await browser.context.route('https://mjai.ekyu.moe/zh-cn.html*',
             lambda route: route.fulfill(content_type='text/html; charset=utf-8', body=form))

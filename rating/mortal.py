@@ -14,6 +14,7 @@ from .reports import AnalysisError, parse_html_report, log_matches
 from . import captcha
 
 MORTAL_SITE = "https://mjai.ekyu.moe/zh-cn.html"
+MORTAL_FLOW_VERSION = "context-response-v3"
 
 
 class MortalBrowser:
@@ -168,11 +169,13 @@ class MortalBrowser:
             await asyncio.sleep(min(1, delay))
             delay -= 1
         page = await self.context.new_page()
-        navigations = {}
-        def track_navigation(request):
-            if request.is_navigation_request():
-                navigations[request.frame] = request
-        page.on("request", track_navigation)
+        responses = []
+        def track_response(response):
+            # Context-level events include the first navigation of a new tab;
+            # a page-level listener cannot see that request reliably.
+            if response.request.is_navigation_request():
+                responses.append(response)
+        self.context.on("response", track_response)
         try:
             target = f"{MORTAL_SITE}?url={quote(game['record_url'], safe='')}"
             try:
@@ -199,26 +202,38 @@ class MortalBrowser:
             await submit.click()
             deadline = time.monotonic() + int(os.getenv("MORTAL_TIMEOUT", "300"))
             last_error = "未收到报告"
+            unverified = None
             while time.monotonic() < deadline:
                 if cancelled():
                     raise AnalysisError("任务已取消。")
-                # 官方结果可能显示于新页或 iframe；只解析真正的元数据。
+                # Parse the precise HTTP response first, including popup and
+                # redirect navigation. Never infer provenance from tab order.
+                for response in list(responses):
+                    try:
+                        if response.status != 200 or not self.submission_matches(response.request, game):
+                            continue
+                        html = await response.text()
+                        result = parse_html_report(html, game["seat"])
+                        self.validate_report_identity(result, html, game, True)
+                        result['requested_model'] = os.getenv('MORTAL_MODEL_TAG', '4.1b')
+                        return result, html
+                    except AnalysisError as exc:
+                        last_error = str(exc)
+                        if any(s in last_error for s in ("未公开 Rating", "与目标用户不符", "牌谱 ID 与当前比赛不同")):
+                            raise
+                    except BrowserError:
+                        continue
+                # Legacy reports with explicit IDs remain valid. Missing IDs
+                # wait for the response event instead of failing in a popup race.
                 for p in self.context.pages:
                     for frame in p.frames:
                         try:
-                            request = navigations.get(frame) if p == page else None
-                            bound = bool(request and self.submission_matches(request, game))
-                            if bound:
-                                response = await request.response()
-                                if not response or response.status != 200 or response.url != frame.url:
-                                    continue
-                                # Parse the actual server response, not an unrelated
-                                # tab or a DOM that might belong to another navigation.
-                                html = await response.text()
-                            else:
-                                html = await frame.content()
+                            html = await frame.content()
                             result = parse_html_report(html, game["seat"])
-                            self.validate_report_identity(result, html, game, bound)
+                            if not result.get("log_id"):
+                                unverified = (result, html)
+                                continue
+                            self.validate_report_identity(result, html, game)
                             result['requested_model'] = os.getenv('MORTAL_MODEL_TAG', '4.1b')
                             return result, html
                         except AnalysisError as exc:
@@ -231,10 +246,13 @@ class MortalBrowser:
                 if re.search(r"验证码|人机验证|too many requests|rate limit|access denied|captcha", text, re.I):
                     raise AnalysisError("Mortal 要求人机验证或触发限流；已暂停自动访问，请在原站完成验证或稍后重试。")
                 await asyncio.sleep(2)
+            if unverified is not None:
+                self.validate_report_identity(unverified[0], unverified[1], game)
             raise AnalysisError(f"Mortal 分析超时：{last_error}。网站结果结构可能更新。")
         except BrowserError as exc:
             raise AnalysisError("Mortal 浏览器操作失败或控件超时，请确认网站表单并重试。") from exc
         finally:
+            self.context.remove_listener("response", track_response)
             # 任务之间关闭所有页面，防止把上一场报告误当作新结果。
             for p in list(self.context.pages):
                 try:
