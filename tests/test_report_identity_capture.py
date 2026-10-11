@@ -124,3 +124,49 @@ def test_refresh_header_with_quoted_url():
     response = SimpleNamespace(url='https://mjai.ekyu.moe/review',
         headers={'refresh': '0; URL="/report/actual.html"'})
     assert MortalBrowser.server_redirect_targets(response, '') == {'https://mjai.ekyu.moe/report/actual.html'}
+
+
+async def test_slow_post_uses_analysis_deadline_not_click_timeout(game, html_report, monkeypatch):
+    import asyncio
+    from test_browser import OFFICIAL_FORM
+    monkeypatch.setenv('MORTAL_INTERVAL', '0')
+    monkeypatch.setenv('MORTAL_TIMEOUT', '8')
+    original = MortalBrowser.prepare_form
+    async def short_click_timeout(self, page, game):
+        submit = await original(self, page, game)
+        page.set_default_timeout(500)
+        return submit
+    monkeypatch.setattr(MortalBrowser, 'prepare_form', short_click_timeout)
+    async with MortalBrowser() as browser:
+        await browser.context.route('https://mjai.ekyu.moe/zh-cn.html*',
+            lambda route: route.fulfill(content_type='text/html', body=OFFICIAL_FORM.replace(' disabled', '')))
+        async def slow_report(route):
+            await asyncio.sleep(1.5)
+            await route.fulfill(content_type='text/html', body=html_report)
+        await browser.context.route('https://mjai.ekyu.moe/review', slow_report)
+        result, _ = await browser.analyze(game)
+        assert result['rating'] == 90.25
+
+
+async def test_browser_failure_saves_stage_without_secret_call_logs(game, monkeypatch, tmp_path):
+    import json
+    from playwright.async_api import Error
+    from test_browser import OFFICIAL_FORM
+    monkeypatch.setenv('MORTAL_INTERVAL', '0')
+    monkeypatch.setenv('RATING_DATA_DIR', str(tmp_path))
+    async def broken_form(self, page, game):
+        raise Error('Locator.fill: Timeout; URL ?token=TEST-SECRET-DO-NOT-SAVE')
+    monkeypatch.setattr(MortalBrowser, 'prepare_form', broken_form)
+    async with MortalBrowser() as browser:
+        await browser.context.route('https://mjai.ekyu.moe/zh-cn.html*',
+            lambda route: route.fulfill(content_type='text/html', body=OFFICIAL_FORM))
+        with pytest.raises(AnalysisError, match='填写分析表单.*等待超时') as exc:
+            await browser.analyze(game)
+    paths = list((tmp_path / 'reports').glob('navigation-*.json'))
+    assert len(paths) == 1
+    raw = paths[0].read_text(encoding='utf-8')
+    data = json.loads(raw)
+    assert data['stage'] == '填写分析表单'
+    assert data['responses'][0]['path'] == '/zh-cn.html'
+    assert 'TEST-SECRET' not in raw + str(exc.value)
+    assert str(paths[0]) in str(exc.value)

@@ -15,7 +15,7 @@ from .reports import AnalysisError, parse_html_report, log_matches
 from . import captcha
 
 MORTAL_SITE = "https://mjai.ekyu.moe/zh-cn.html"
-MORTAL_FLOW_VERSION = "server-refresh-v4"
+MORTAL_FLOW_VERSION = "submission-diagnostics-v5"
 
 
 class MortalBrowser:
@@ -256,18 +256,52 @@ class MortalBrowser:
             if isinstance(payload, dict) and isinstance(payload.get('url'), str) and isinstance(payload.get('refresh'), str):
                 meta_snapshots.append(payload)
         self._navigation_observer = observe_meta
+        stage = "打开网站"
+        def save_navigation(error=None):
+            import json
+            diagnostics = []
+            for response in responses:
+                request = response.request
+                url = urlsplit(response.url)
+                diagnostics.append({"method": request.method, "host": url.hostname,
+                    "path": url.path, "status": response.status,
+                    "post_matches": self.submission_matches(request, game),
+                    "linked_by_server": urldefrag(response.url)[0] in linked_targets})
+            # Never write request bodies, query strings, cookies or raw exception
+            # messages: Playwright call logs may contain credential-bearing URLs.
+            payload = {"version": MORTAL_FLOW_VERSION, "stage": stage,
+                       "responses": diagnostics}
+            if error is not None:
+                message = str(error).lower()
+                reason = "浏览器操作失败"
+                if "timeout" in message:
+                    reason = "等待超时"
+                elif "closed" in message:
+                    reason = "浏览器页面或驱动连接已关闭"
+                payload.update(error_type=type(error).__name__, reason=reason)
+            root = Path(os.getenv("RATING_DATA_DIR", ".data")).resolve() / "reports"
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+                path = root / f"navigation-{time.time_ns()}.json"
+                path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                return path, payload.get("reason", "")
+            except OSError:
+                return None, payload.get("reason", "")
         try:
             target = f"{MORTAL_SITE}?url={quote(game['record_url'], safe='')}"
             try:
                 response = await page.goto(target, wait_until="domcontentloaded", timeout=45000)
             except BrowserError as exc:
+                save_navigation(exc)
                 if "ERR_CERT_AUTHORITY_INVALID" in str(exc):
                     raise AnalysisError("Chromium 尚未信任此云环境的代理 CA，TLS 校验失败；需要经授权配置证书信任后重试。") from exc
                 raise AnalysisError("无法打开 Mortal 网站。请检查网络策略及 mjai.ekyu.moe 域名放行。") from exc
             if response and response.status >= 400:
                 raise AnalysisError(f"Mortal 网站返回 HTTP {response.status}。")
             await page.wait_for_timeout(1000)
+            stage = "填写分析表单"
             submit = await self.prepare_form(page, game)
+            stage = "等待验证完成"
             if await submit.is_disabled() and self.captcha_enabled:
                 await captcha.complete(page, cancelled)
             # 等待站点自己的正常验证回调；不生成 token、不点击/破解验证控件。
@@ -279,7 +313,12 @@ class MortalBrowser:
             if await submit.is_disabled():
                 raise AnalysisError("Mortal 提交按钮等待 Cloudflare 人机验证，已暂停自动提交。请用普通 Edge 在原站手动分析，启用 Rating 后保存 Classic HTML 或 KillerDucky 原始 JSON，再导入报告；未提交该场牌谱。")
             self.last_submit = time.monotonic()
-            await submit.click()
+            stage = "提交分析表单"
+            # The click timeout must not cover the server's analysis/queue wait.
+            # Response listeners already track the exact submitted request;
+            # the following loop owns the longer analysis deadline.
+            await submit.click(no_wait_after=True)
+            stage = "接收分析报告"
             deadline = time.monotonic() + int(os.getenv("MORTAL_TIMEOUT", "300"))
             last_error = "未收到报告"
             unverified = None
@@ -343,32 +382,25 @@ class MortalBrowser:
                                 raise
                         except BrowserError:
                             continue
-                text = await page.locator("body").inner_text()
+                try:
+                    text = await page.locator("body").inner_text(timeout=2000)
+                except BrowserError:
+                    # A transient refresh must not terminate report collection.
+                    await asyncio.sleep(1)
+                    continue
                 if re.search(r"验证码|人机验证|too many requests|rate limit|access denied|captcha", text, re.I):
                     raise AnalysisError("Mortal 要求人机验证或触发限流；已暂停自动访问，请在原站完成验证或稍后重试。")
                 await asyncio.sleep(2)
             if unverified is not None:
-                import json
-                diagnostics = []
-                for response in responses:
-                    request = response.request
-                    url = urlsplit(response.url)
-                    diagnostics.append({"method": request.method, "host": url.hostname,
-                        "path": url.path, "status": response.status,
-                        "post_matches": self.submission_matches(request, game),
-                        "linked_by_server": urldefrag(response.url)[0] in linked_targets})
-                root = Path(os.getenv("RATING_DATA_DIR", ".data")).resolve() / "reports"
-                try:
-                    root.mkdir(parents=True, exist_ok=True)
-                    (root / f"navigation-{time.time_ns()}.json").write_text(
-                        json.dumps({"version": MORTAL_FLOW_VERSION, "responses": diagnostics},
-                                   ensure_ascii=False), encoding="utf-8")
-                except OSError:
-                    pass
+                save_navigation()
                 self.validate_report_identity(unverified[0], unverified[1], game)
-            raise AnalysisError(f"Mortal 分析超时：{last_error}。网站结果结构可能更新。")
+            saved, _ = save_navigation()
+            location = f"诊断已保存到：{saved}。" if saved else "诊断保存失败，请检查数据目录写入权限。"
+            raise AnalysisError(f"Mortal 分析超时：{last_error}。{location}")
         except BrowserError as exc:
-            raise AnalysisError("Mortal 浏览器操作失败或控件超时，请确认网站表单并重试。") from exc
+            saved, reason = save_navigation(exc)
+            location = f"诊断已保存到：{saved}。" if saved else "诊断保存失败，请检查数据目录写入权限。"
+            raise AnalysisError(f"Mortal 在“{stage}”阶段{reason}。{location}") from exc
         finally:
             self._navigation_observer = None
             self.context.remove_listener("response", track_response)
