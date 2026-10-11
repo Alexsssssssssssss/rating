@@ -48,7 +48,7 @@ MORTAL_HEADLESS=0 MORTAL_VERIFICATION_TIMEOUT=180 .venv/bin/python -m uvicorn ra
 
 站方邮件已确认使用标准 Bearer token，最多 1 QPS。程序对用户名搜索、分页和重试共享限速，请求间隔至少 1.1 秒。仍仅支持单进程服务；不要同时使用同一个 token 在多台机器或其他脚本中查询，以免合计频率超过限制。token 在环境设置中填入 `AMAE_BEARER_TOKEN` 的安全值，只填 token 本身，不加 `Bearer ` 前缀，程序会自动添加。
 
-Mortal 若遇到人机验证、限流、无法识别表单、缺少 Rating 等情况会停止该批访问，保留已成功结果并标明原因。站点访问控制或凭据缺失时，不会绕过验证。将访问问题记录下来并提供按钮不代表已解决访问问题。
+Mortal 若遇到人机验证、限流、无法识别表单、缺少 Rating 等情况会停止该批访问，保留已成功结果并标明原因。默认使用人工验证；经站长允许时可选用付费 2Captcha 接入，详见 [配置说明](TWOCAPTCHA_SETUP.md)。将访问问题记录下来并提供按钮不代表已解决访问问题。
 
 ### 使用方式
 
@@ -86,3 +86,7 @@ cd /workspace/rating
 - [SAPikachu/amae-koromo](https://github.com/SAPikachu/amae-koromo)：`src/data/source/misc.ts`、`records/loader.ts`、`types/record.ts`、`types/gameMode.ts`。
 - [Equim-chan/mjai-reviewer](https://github.com/Equim-chan/mjai-reviewer)：`src/review/mortal.rs`、`src/render.rs`、`templates/report.tera`。
 - [Mortal](https://github.com/Equim-chan/Mortal)：本地推理另需模型权重，开源代码不包含可直接使用的官方训练权重。
+
+## 可选 2Captcha
+
+配置、费用边界及本地合并步骤见 [TWOCAPTCHA_SETUP.md](TWOCAPTCHA_SETUP.md)。此功能通过模拟测试，尚未完成真实付费验证。

@@ -9,17 +9,19 @@ from urllib.parse import parse_qs, quote, urlsplit
 from playwright.async_api import async_playwright, Error as BrowserError
 
 from .reports import AnalysisError, parse_html_report, log_matches
+from . import captcha
 
 MORTAL_SITE = "https://mjai.ekyu.moe/zh-cn.html"
 
 
 class MortalBrowser:
-    """串行使用官方网站表单，遇到验证立即停止，不使用未经确认的私有 API。"""
+    """串行使用官方网站表单；可选接入经站长许可的验证服务。"""
     def __init__(self):
         self.pw = self.browser = self.context = None
         self.last_submit = 0
 
     async def __aenter__(self):
+        self.captcha_enabled = captcha.enabled()
         self.pw = await async_playwright().start()
         opts = {"headless": os.getenv("MORTAL_HEADLESS", "1") != "0"}
         executable = os.getenv("CHROMIUM_PATH") or shutil.which("chromium") or shutil.which("google-chrome")
@@ -35,6 +37,8 @@ class MortalBrowser:
         try:
             self.browser = await self.pw.chromium.launch(**opts)
             self.context = await self.browser.new_context(locale="zh-CN", accept_downloads=True)
+            if self.captcha_enabled:
+                await self.context.add_init_script(captcha.TURNSTILE_CAPTURE)
         except BrowserError as exc:
             await self.pw.stop()
             raise AnalysisError("Chromium 无法启动。请安装系统 Chromium 或运行 python -m playwright install chromium。") from exc
@@ -104,6 +108,8 @@ class MortalBrowser:
                 raise AnalysisError(f"Mortal 网站返回 HTTP {response.status}。")
             await page.wait_for_timeout(1000)
             submit = await self.prepare_form(page, game)
+            if await submit.is_disabled() and self.captcha_enabled:
+                await captcha.complete(page, cancelled)
             # 等待站点自己的正常验证回调；不生成 token、不点击/破解验证控件。
             verification_deadline = time.monotonic() + int(os.getenv('MORTAL_VERIFICATION_TIMEOUT', '15'))
             while await submit.is_disabled() and time.monotonic() < verification_deadline:

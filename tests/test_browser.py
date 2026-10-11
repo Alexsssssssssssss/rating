@@ -64,3 +64,30 @@ def test_cache_namespace_includes_model(game, monkeypatch):
     monkeypatch.setenv('MORTAL_MODEL_TAG','4.1b'); a=cache_path(game)
     monkeypatch.setenv('MORTAL_MODEL_TAG','4.1c'); b=cache_path(game)
     assert a != b
+
+
+async def test_optional_captcha_uses_site_callback(game, monkeypatch):
+    from rating import captcha
+    monkeypatch.setenv('MORTAL_CAPTCHA_PROVIDER', '2captcha')
+    monkeypatch.setenv('TWOCAPTCHA_API_KEY', 'test-secret-not-real')
+    async def solve(parameters, cancelled):
+        assert parameters['sitekey'] == 'public-test-sitekey'
+        return 'test-token'
+    monkeypatch.setattr(captcha, 'solve', solve)
+    html = OFFICIAL_FORM + '''<script>
+      window.turnstile = {render: (container, options) => 'widget-1'};
+      turnstile.render(document.body, {sitekey: 'public-test-sitekey',
+        callback: token => {window.receivedToken = token;
+          document.querySelector('form[name="reviewForm"] button').disabled = false;}});
+    </script>'''
+    async with MortalBrowser() as browser:
+        await browser.context.route('https://mjai.ekyu.moe/**',
+            lambda route: route.fulfill(content_type='text/html; charset=utf-8', body=html))
+        page = await browser.context.new_page()
+        await page.goto('https://mjai.ekyu.moe/zh-cn.html')
+        submit = await browser.prepare_form(page, game)
+        assert await submit.is_disabled()
+        await captcha.complete(page)
+        assert not await submit.is_disabled()
+        assert await page.evaluate('window.receivedToken') == 'test-token'
+        assert await page.locator('[name="cf-turnstile-response"]').input_value() == 'test-token'
