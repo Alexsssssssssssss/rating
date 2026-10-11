@@ -15,7 +15,7 @@ MORTAL_SITE = "https://mjai.ekyu.moe/zh-cn.html"
 
 
 class MortalBrowser:
-    """串行使用官方网站表单；可选接入经站长许可的验证服务。"""
+    """串行使用官方网站表单，遇到验证立即停止，不使用未经确认的私有 API。"""
     def __init__(self):
         self.pw = self.browser = self.context = None
         self.last_submit = 0
@@ -117,7 +117,7 @@ class MortalBrowser:
                     raise AnalysisError('任务已取消。')
                 await asyncio.sleep(1)
             if await submit.is_disabled():
-                raise AnalysisError("Mortal 提交按钮等待 Cloudflare 人机验证，已暂停自动提交。请在原站完成验证；未提交该场牌谱。")
+                raise AnalysisError("Mortal 提交按钮等待 Cloudflare 人机验证，已暂停自动提交。请用普通 Edge 在原站手动分析，启用 Rating 后保存 Classic HTML 或 KillerDucky 原始 JSON，再导入报告；未提交该场牌谱。")
             self.last_submit = time.monotonic()
             await submit.click()
             deadline = time.monotonic() + int(os.getenv("MORTAL_TIMEOUT", "300"))
