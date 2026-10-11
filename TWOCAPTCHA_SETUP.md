@@ -41,3 +41,9 @@ Cloudflare 仍可能拒绝结果；若报错，提供任务错误文本，不发
 无法确认回调时不创建付费任务，不自动重试收费创建请求。
 当前环境无法打开 2Captcha 文档（网络策略返回 403），上线前可由本地 Codex对照 https://2captcha.com/api-docs/cloudflare-turnstile 核对当前字段。
 不支持整页 Cloudflare 拦截或需要更改浏览器 User-Agent 的流程。
+
+## Classic 报告没有 log_id 时
+
+自动流程只在实际 `/review` POST 的牌谱 URL、玩家座位、Mortal 引擎和目标 UUID 全部对应时，通过当前导航的服务器响应绑定身份；支持 URL-encoded 和 multipart 表单，以及同站 HTTP 重定向。读取实际响应正文并解析目标座位，记录 `identity_method=official-post-response`。报告自带的明确编号冲突仍拒绝。
+离线 HTML 没有这些请求记录时，继续拒绝直接赋予牌谱身份，保留本地原有 ref/完整牌谱内容校验。仅凭打开报告的标签页地址不能验证身份。脚本或跨站跳转、无法追溯的弹窗仍会安全拒绝。
+真实 HTML 与用户本地解析器已在模拟提交中验证；未在真实 Mortal 上重新付费跑通整个流程。

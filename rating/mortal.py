@@ -4,6 +4,8 @@ import re
 import shutil
 import time
 from pathlib import Path
+from email.parser import BytesParser
+from email.policy import default as email_policy
 from urllib.parse import parse_qs, quote, urlsplit
 
 from playwright.async_api import async_playwright, Error as BrowserError
@@ -45,10 +47,14 @@ class MortalBrowser:
         return self
 
     async def __aexit__(self, *args):
-        if self.browser:
-            await self.browser.close()
-        if self.pw:
-            await self.pw.stop()
+        try:
+            if self.browser:
+                await self.browser.close()
+        except BrowserError:
+            pass
+        finally:
+            if self.pw:
+                await self.pw.stop()
 
     async def prepare_form(self, page, game):
         """已在官方网站核对的 reviewForm 控件；不操作派遣个室表单。"""
@@ -84,16 +90,61 @@ class MortalBrowser:
         return submit
 
     @staticmethod
-    def validate_report_identity(result, html, game):
+    def submission_matches(request, game):
+        """Bind a document response to the exact official POST and redirects."""
+        current = request
+        while current is not None:
+            url = urlsplit(current.url)
+            if url.scheme != "https" or url.netloc != "mjai.ekyu.moe":
+                return False
+            previous = current.redirected_from
+            if previous is None:
+                break
+            current = previous
+        if current is None or current.method != "POST" or url.path != "/review":
+            return False
+        content_type = current.headers.get("content-type", "")
+        body = current.post_data_buffer or b""
+        fields = {}
+        try:
+            if content_type.startswith("application/x-www-form-urlencoded"):
+                fields = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+            elif content_type.startswith("multipart/form-data"):
+                message = BytesParser(policy=email_policy).parsebytes(
+                    ("Content-Type: " + content_type + "\r\nMIME-Version: 1.0\r\n\r\n").encode() + body)
+                if not message.is_multipart():
+                    return False
+                for part in message.iter_parts():
+                    name = part.get_param("name", header="content-disposition")
+                    if name in ("log-url", "player-id", "engine"):
+                        fields.setdefault(name, []).append((part.get_payload(decode=True) or b"").decode("utf-8"))
+            else:
+                return False
+        except (ValueError, UnicodeError):
+            return False
+        return (log_matches(game["uuid"], game["record_url"])
+                and fields.get("log-url") == [game["record_url"]]
+                and fields.get("player-id") == [str(game["seat"])]
+                and fields.get("engine") == ["mortal"])
+
+    @staticmethod
+    def validate_report_identity(result, html, game, bound_submission=False):
         """Preserve a parsed report for diagnosis; never assign an unverified score."""
         log_id = result.get("log_id")
         if log_matches(game["uuid"], log_id):
             return
+        if (not isinstance(log_id, str) or not log_id.strip()) and bound_submission:
+            # The report itself has no ID. Record the provenance explicitly:
+            # identity comes from the actual POST response, not invented metadata.
+            result["log_id"] = game["uuid"]
+            result["identity_method"] = "official-post-response"
+            result["submitted_record_url"] = game["record_url"]
+            return
         root = Path(os.getenv("RATING_DATA_DIR", ".data")).resolve() / "reports"
-        root.mkdir(parents=True, exist_ok=True)
         # Use a generated name, never untrusted game identifiers as a path.
         path = root / f"unverified-{time.time_ns()}.html"
         try:
+            root.mkdir(parents=True, exist_ok=True)
             path.write_text(html, encoding="utf-8")
         except OSError:
             saved = "报告保存失败，请检查数据目录写入权限。"
@@ -117,6 +168,11 @@ class MortalBrowser:
             await asyncio.sleep(min(1, delay))
             delay -= 1
         page = await self.context.new_page()
+        navigations = {}
+        def track_navigation(request):
+            if request.is_navigation_request():
+                navigations[request.frame] = request
+        page.on("request", track_navigation)
         try:
             target = f"{MORTAL_SITE}?url={quote(game['record_url'], safe='')}"
             try:
@@ -150,9 +206,19 @@ class MortalBrowser:
                 for p in self.context.pages:
                     for frame in p.frames:
                         try:
-                            html = await frame.content()
+                            request = navigations.get(frame) if p == page else None
+                            bound = bool(request and self.submission_matches(request, game))
+                            if bound:
+                                response = await request.response()
+                                if not response or response.status != 200 or response.url != frame.url:
+                                    continue
+                                # Parse the actual server response, not an unrelated
+                                # tab or a DOM that might belong to another navigation.
+                                html = await response.text()
+                            else:
+                                html = await frame.content()
                             result = parse_html_report(html, game["seat"])
-                            self.validate_report_identity(result, html, game)
+                            self.validate_report_identity(result, html, game, bound)
                             result['requested_model'] = os.getenv('MORTAL_MODEL_TAG', '4.1b')
                             return result, html
                         except AnalysisError as exc:
@@ -171,4 +237,7 @@ class MortalBrowser:
         finally:
             # 任务之间关闭所有页面，防止把上一场报告误当作新结果。
             for p in list(self.context.pages):
-                await p.close()
+                try:
+                    await p.close()
+                except BrowserError:
+                    pass
